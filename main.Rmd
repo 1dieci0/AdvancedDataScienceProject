@@ -1,0 +1,401 @@
+---
+title: "Network Science Project: Darkweb Dataset"
+author: "Diego Cirillo 157176"
+output: html_document
+date: "15-01-2025"
+---
+
+```{r setup, include=FALSE}
+set.seed(1337)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduzione
+
+## Contesto del Dataset
+Il dataset analizzato in questo progetto rappresenta uno snapshot della sottorete "darkweb" del World Wide Web, ottenuto tramite crawling attraverso il popolare proxy tor2web `onion.link`. In questa rete, ogni nodo corrisponde a un dominio, mentre un arco pesato tra due nodi rappresenta il numero di pagine su un dominio che contengono link verso un altro dominio. Il dataset copre un intervallo temporale compreso tra novembre 2016 e febbraio 2017.
+
+## Obiettivi dell'Analisi
+L'obiettivo di questa analisi è esplorare la struttura del darkweb utilizzando tecniche di Network Science. In particolare, mi concentrerò su:
+
+- **Analisi locale**: studio delle proprietà dei singoli nodi, come il grado, la centralità e la distribuzione dei link.
+- **Analisi di gruppo**:  individuazione di comunità e cluster all'interno della rete, utilizzando algoritmi di clustering.
+- **Analisi globale**: valutazione delle caratteristiche strutturali della rete, tra cui connettività, distribuzione dei gradi e proprietà di small-world.
+
+Questa analisi fornirà spunti utili per comprendere la connettività e l'organizzazione della darkweb, mettendo in evidenza eventuali nodi centrali e strutture emergenti.
+
+```{r libraries, include=FALSE}
+library(igraph)       
+library(tidygraph)    
+library(ggraph)  
+library(ggplot2)
+library(poweRlaw)
+```
+
+# Caricamento dati
+
+```{r load-data}
+edges <- read.csv("data/darkweb-edges.ss", sep = ";")
+nodes <- read.csv("data/darkweb-nodes.ss", sep = ";")
+```
+
+```{r head-data}
+head(edges)
+head(nodes)
+```
+
+
+# Analisi preliminare degli archi
+
+Prima di iniziare con le vere analisi controllo i dati presenti nel dataset.
+
+## Numero di archi e di nodi
+
+```{r nodes-edges-size}
+num_nodes <- nrow(nodes)
+num_edges <- nrow(edges)
+cat("La rete analizzata è composta da", num_nodes, "nodi e", num_edges, "archi\n")
+```
+
+L'analisi suggerisce una rete complessa con un numero significativo di connessioni.
+
+## Piccola analisi sugli archi
+
+Ho iniziato verificando alcune proprietà degli archi della rete:
+
+### Archi con peso maggiore di 1
+
+```{r edges-weight}
+heavy_weights <- edges %>%
+  filter(Weight > 1)
+
+cat("Sono stati rilevati", nrow(heavy_weights) ,"archi con peso superiore a 1\n")
+head(heavy_weights)
+```
+### Archi indiretti
+
+In ogni arco c'è un campo "Type" che determina se è diretto o non diretto, controllo se ci sono effettivamente archi non diretti.
+
+```{r directed-edges}
+undirected_edges <- edges %>%
+  filter(Type != "Directed")
+
+cat("Sono stati rilevati", nrow(undirected_edges) ,"archi indiretti\n")
+```
+
+### Self loops
+
+```{r self-loops}
+# Filter self-loops (Source == Target)
+self_loops <- edges %>%
+  filter(Source == Target)
+
+cat("Sono stati rilevati", nrow(self_loops), "self loops\n")
+```
+
+Strano non ci siano nodi con self loops, probabilmente sono stati rimossi dal creatore del dataset o il crawler che è stato usato eliminava in automatico i link allo stesso dominio della pagina.
+
+
+# Creazione grafo
+
+```{r create-graph}
+g <- tbl_graph(nodes = nodes, edges = edges, directed = TRUE)
+
+head(as_tibble(g, "nodes"))
+head(as_tibble(g, "edges"))
+```
+
+# Visualizzazione del grafo
+
+```{r display-graph}
+ggraph(g, layout = "lgl") + 
+  geom_edge_link(alpha = 0.5) +
+  geom_node_point(size = 3, color = "tomato") +
+  theme_minimal() +
+  labs(title = "Basic Network Visualization")
+```
+
+La rete appare densa, con un alto numero di nodi e connessioni, formando una struttura ellittica con un nucleo centrale fortemente connesso e nodi periferici meno collegati. L'assenza di nodi isolati suggerisce un'alta connettività complessiva. La distribuzione delle connessioni potrebbe indicare una rete scale-free, con pochi hub altamente connessi e molti nodi con poche connessioni.
+
+# Local Analysis
+
+```{r local-analysis}
+g <- g %>%
+  activate(nodes) %>%
+  mutate(
+    in_degree = centrality_degree(mode = "in"),
+    out_degree = centrality_degree(mode = "out"),
+    betweenness = centrality_betweenness(),
+    closeness = centrality_closeness(),
+    eigen = centrality_eigen(),
+    pagerank = centrality_pagerank(),
+  )
+```
+
+## Distribuzione del grado
+
+```{r degree-distribution, warning=FALSE}
+node_data <- as_tibble(g)
+
+skewness = function(x) mean( (x - mean(x))^3 ) / sd(x)^3
+cat("skewness in-degree:", skewness(node_data$in_degree), "\n")
+cat("skewness out-degree:", skewness(node_data$out_degree), "\n")
+
+summary(node_data$in_degree)
+summary(node_data$out_degree)
+
+zero_out_degree <- as_tibble(g, what = "nodes") %>%
+  filter(out_degree == 0) 
+
+cat(nrow(zero_out_degree), "nodi hanno 0 archi uscenti su", nrow(nodes), "\n")
+
+ggplot(node_data, aes(x = in_degree)) +
+  geom_histogram(binwidth = max(node_data$in_degree) / 100, fill = "blue", color = "black") +
+  labs(title = "In-Degree Centrality Histogram",
+       x = "In-Degree",
+       y = "Frequency") +
+  theme_minimal()
+
+ggplot(node_data, aes(x = out_degree)) +
+  geom_histogram(bins = 30, fill = "blue", color = "black") +
+  scale_x_log10() +  # Log-transform the x-axis
+  labs(title = "Out-Degree Centrality Histogram (Log Scale)",
+       x = "Out-Degree (log scale)",
+       y = "Frequency") +
+  theme_minimal()
+
+```
+
+La distribuzione del grado mostra una rete altamente sbilanciata, con la maggior parte dei nodi che possiede pochi collegamenti in uscita, mentre un numero ristretto di nodi ha un numero estremamente elevato di connessioni. Questo aumenta la supposizione di una struttura scale-free, dove pochi nodi fungono da hub con un ruolo centrale nella diffusione dell'informazione, mentre la maggior parte dei nodi ha un'influenza limitata sulla rete.
+
+
+## Verifica della legge di potenza
+
+```{r power-law-check, warning=FALSE}
+degree_dist = degree(g, mode = "all")
+degree_df = data.frame(Degree = degree_dist)
+
+ggplot(degree_df, aes(x = Degree)) +
+  geom_histogram(bins = 30, fill = "blue", alpha = 0.7) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(title = "Degree Distribution (Log-Log Scale)",
+       x = "Degree (log scale)",
+       y = "Count (log scale)") +
+  theme_minimal()
+
+# Cumulative distribution
+ccdf = function(d) {
+  n = length(d)
+  max = max(d)
+  p = rep(0, max)
+  for (i in 1:length(p)) {
+    p[i] = length(d[d >= i]) / n
+  } 
+  return(p)
+}
+
+links = 3
+p = ccdf(degree_dist)
+plot(links:max(degree_dist), p[links:length(p)], 
+     log="xy", type = "l", xlab="Degree", ylab="CCDF")
+
+fit <- fit_power_law(degree_dist)
+fit
+
+
+```
+
+Per confermare la struttura scale-free della rete, ho verificato che la distribuzione del grado segua una legge di potenza (power-law). L'analisi ha mostrato:
+
+- **Grafici log-log e CCDF**: Entrambi presentano un andamento approssimativamente lineare, indicativo di una relazione power-law.
+- **Parametri della distribuzione**: L'esponente alpha stimato è compreso fra 2 e 3, quindi è tipico delle reti scale-free e la soglia minima xmin = 9 delimita il lowerbound in cui la power-law è valida.
+- **Bontà del fit**: KS.stat molto basso indica un'ottima aderenza ai dati e il test del rapporto di verosimiglianza conferma la power-law come modello significativamente migliore rispetto a distribuzioni alternative.
+
+Questi risultati supportano fortemente l’ipotesi di una distribuzione power-law, caratteristica delle reti scale-free. Ciò implica la presenza di hub (nodi con grado elevato) che rendono la rete robusta a guasti casuali, ma vulnerabile a interventi mirati. Nel contesto del darkweb, questi hub potrebbero corrispondere a servizi critici (es. mercati o forum) da cui dipende gran parte dell’attività della rete.
+
+Questo è coerente con la natura del darkweb, dove la mancanza di un motore di ricerca centralizzato porta all'esistenza di alcuni hub principali, spesso rappresentati da wiki contenenti link a molte altre pagine.
+
+
+## Analisi dei nodi più connessi
+
+```{r top_outdegree}
+top_outdegree_nodes <- as_tibble(g, what = "nodes") %>%
+  arrange(desc(out_degree)) %>%
+  head(5)
+print(top_outdegree_nodes)
+```
+
+
+```{r check_in_edge}
+in_edges <- edges %>%
+  filter(Target == "directoryvi6plzm")
+
+suspect_node <- as_tibble(g, what = "nodes") %>%
+  filter(Id == in_edges$Source)
+print(suspect_node)
+
+
+```
+
+Un'osservazione interessante riguarda il nodo con più archi uscenti, il quale riceve un solo link in ingresso, proveniente dal secondo nodo con più archi uscenti. Questo suggerisce che `directoryvi6plzm` potrebbe o essere una directory non ufficiale o essere scarsamente riconosciuta dagli utenti del darkweb o avere una brutta reputazione.
+
+# Group Analysis
+
+Per individuare strutture interne alla rete, ho applicato diversi algoritmi di rilevamento delle comunità, selezionando quello con la modularità più elevata.
+
+```{r modularity}
+
+# List of community detection methods in igraph
+methods <- list(
+  "Fast Greedy" = cluster_fast_greedy,
+  "Leading Eigenvector" = cluster_leading_eigen,
+  "Louvain" = cluster_louvain,
+  "Walktrap" = cluster_walktrap,
+  "Infomap" = cluster_infomap
+)
+
+# Compute modularity for each method
+results <- data.frame(Method = character(), Modularity = numeric(), stringsAsFactors = FALSE)
+
+for (method in names(methods)) {
+  tryCatch({
+    # Detect communities
+    communities <- methods[[method]](as_undirected(g))
+    
+    # Compute modularity
+    modularity_value <- modularity(communities)
+    
+    # Store the result
+    results <- rbind(results, data.frame(Method = method, Modularity = modularity_value))
+  }, error = function(e) {
+    # Handle any errors (e.g., if a method is not applicable)
+    cat("Error with method:", method, "\n")
+  })
+}
+
+# Sort results by modularity in decreasing order
+results <- results[order(-results$Modularity), ]
+
+# Print the results
+print(results)
+```
+
+Il metodo Louvain si è rivelato il più efficace e ha identificato diverse comunità nella rete.
+
+```{r group_analysis}
+communities <- cluster_louvain(as_undirected(g))
+
+g <- g %>%
+  mutate(Community = as.factor(communities$membership))
+
+ggraph(g, layout = "lgl") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = Community), size = 3) +
+  theme_void() +
+  labs(title = "Community Detection in Darkweb Network")
+```
+
+La visualizzazione del grafo con le comunità evidenzia la presenza di cluster di nodi densamente connessi, che potrebbero rappresentare specifiche categorie di siti o gruppi di attività correlate. Se un nodo fosse identificato come parte di attività illecite, sarebbe opportuno analizzare anche gli altri nodi della sua comunità.
+
+# Global Analysis
+
+```{r global_analysis}
+comp <- components(as.igraph(g))
+cat("Numbero di componenti:", comp$no, "\n")
+
+#giant_component <- induced_subgraph(as.igraph(g), which(comp$membership == which.max(comp$size)))
+diameter_val <- diameter(g, directed = TRUE)
+avg_path <- mean_distance(g, directed = TRUE)
+cat("Diametro:", diameter_val, "\nAverage path length", avg_path, "\n")
+
+assortativity_value <- assortativity_degree(g, directed = TRUE)
+cat("Assortativity (degree):", assortativity_value, "\n")
+```
+
+Sebbene la distanza media tra i nodi del grafo (4,35) e il diametro (10) sembrino relativamente bassi, in precedenza è stato mostrato che la maggior parte dei nodi (circa il 87%) non ha archi uscenti, quindi questi valori sono fortemente influenzati dalla presenza di pochi nodi hub con un altissimo grado di connessione.
+L'assortatività negativa per grado indica che i nodi con pochi collegamenti tendono a nodi con tanti collegamenti e viceversa, caratteristica comune nelle reti scale-free.
+
+## Percolazione e vulnerabilità della rete
+
+```{r graph-percolate}
+# percolation removes nodes from a graph and computes 
+# the size of the giant connected component
+# INPUT
+# g: graph to percolate
+# size: number of nodes to remove 
+# d: removal vector
+# OUTPUT
+# giant: a vector with sizes of giant components when nodes are removed
+percolate = function(g, size, d) {
+  
+  giant = vector()
+  
+  # initial size of giant component
+  c = components(g)
+  giant[1] = max(c$csize)
+  
+  # find vital nodes
+  names(d) = 1:length(d)
+  d = sort(d, decreasing=TRUE)
+  vital = as.integer(names(d[1:size]))
+  
+  # compute size of giant component after incremental removal 
+  for (i in 1:size) {
+    c = components(delete_vertices(g, vital[1:i]))
+    giant[i+1] = max(c$csize)
+  }
+  
+  return(giant)
+  
+}
+
+# resilience
+size = vcount(g)/2
+# random
+rand = percolate(g, size, d = sample(V(g), size))    
+# degree
+deg = percolate(g, size, d = degree(g))    
+# pagerank
+pr = percolate(g, size, d = node_data$pagerank)    
+# betweenness
+bet = percolate(g, size, d = node_data$betweenness)    
+
+plot(0:size, deg, type = "l", col=1, 
+     xlab="Number of removed nodes", 
+     ylab="Size of giant component")
+lines(0:size, pr, col=2)
+lines(0:size, bet, col=3)
+lines(0:size, rand, col=4)
+lines(0:size, rep(vcount(g)/2, size+1), lty=2)
+legend(x = "topright", 
+       legend = c("deg", "pr", "btw", "rand"), lty = 1, col = 1:4)
+
+```
+
+L'analisi della percolazione ha confermato che la rete è molto vulnerabile ad attacchi mirati sugli hub, in particolare sulle pagine wiki che fungono da punti di accesso principali per la navigazione. Tuttavia, la rete è resistente ai guasti casuali, poiché la rimozione di nodi con pochi collegamenti non compromette significativamente la sua connettività.
+
+Un aspetto interessante è che, anche in caso di attacco mirato alle pagine wiki, le altre pagine rimarrebbero comunque accessibili se si possiede il link diretto, evidenziando una certa resilienza del darkweb alla censura.
+
+## Conclusioni
+
+In questo studio ho analizzato una sottorete del darkweb ottenuta tramite crawling su onion.link, con l’obiettivo di comprendere le caratteristiche strutturali e dinamiche di questa rete complessa.
+
+L'analisi locale ha evidenziato una distribuzione del grado fortemente sbilanciata, tipica di una rete scale-free. In particolare, la verifica della legge di potenza ha mostrato che la coda della distribuzione segue un comportamento power law (con esponente stimato pari a circa 2,06), confermando l’ipotesi che pochi nodi hub dominano la connettività complessiva mentre la maggior parte dei nodi risulta scarsamente connessa.
+
+L'analisi di gruppo, effettuata mediante il metodo Louvain, ha permesso di identificare comunità ben definite all'interno della rete. Questi cluster, caratterizzati da una forte densità di collegamenti interni, potrebbero rappresentare specifiche categorie di siti o gruppi di attività correlate. Tale suddivisione evidenzia come, all’interno del darkweb, certi nodi (ad esempio, le pagine wiki) rivestano un ruolo centrale nella distribuzione delle informazioni e nella navigazione, fungendo da veri e propri punti di accesso.
+
+L'approccio globale ha messo in luce ulteriori aspetti interessanti: una distanza media e un diametro relativamente bassi nonostante la maggior parte dei nodi non presenta archi uscenti. Inoltre, l’assortatività negativa per grado indica una tendenza per i nodi a collegarsi a nodi con un numero di connessioni molto diverso, rafforzando ulteriormente la natura scale-free della rete. Infine, l’analisi della percolazione ha evidenziato una notevole vulnerabilità della rete ad attacchi mirati sui nodi hub, soprattutto sulle pagine wiki, mentre la rete risulta robusta rispetto a guasti casuali. Questo aspetto suggerisce che, pur essendo la rete fragile sotto specifici tipi di attacco, essa mantiene una certa resilienza, in quanto la rimozione di nodi poco connessi non compromette significativamente l’accessibilità complessiva.
+
+In sintesi, lo studio ha fornito una panoramica esaustiva della struttura del darkweb, mettendo in luce come la sua organizzazione, dominata da pochi nodi centrali e da comunità ben definite, comporti sia vantaggi (in termini di robustezza contro guasti casuali) che svantaggi (in termini di vulnerabilità a attacchi mirati).
+
+
+
+
+
+
+
+
+
+
